@@ -1,0 +1,36 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Set the umask for this script
+umask "$UMASK"
+
+# Check if supplementary GIDs were specified
+if [[ -n "$SUP_PGIDS" ]]
+then
+  # Get the user name from the UID
+  declare user="$(getent passwd $PUID)"
+  user="${user%%:*}"
+
+  # Create an array of the supplementary GIDs
+  declare -a -i gids=(${SUP_PGIDS//,/ })
+
+  # Loop through the GIDs
+  for gid in ${gids[@]}
+  do
+    # Check if a group with this GID doesn't exist
+    if ! getent group $gid > /dev/null
+    then
+      # Create a group with this GID
+      echo "Creating group with GID $gid"
+      groupadd --gid $gid "group$gid"
+    fi
+
+    # Check if the user doesn't belong to a group with this GID
+    if ! getent group $gid | grep --extended-regex "[:,]$user(,|$)" --quiet
+    then
+      # Add the user to a group with this GID
+      echo "Adding user with UID $PUID to group with GID $gid"
+      usermod --append --groups $gid "$user"
+    fi
+  done
+fi
