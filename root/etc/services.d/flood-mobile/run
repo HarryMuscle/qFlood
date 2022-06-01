@@ -1,0 +1,32 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Note: the following is a copy of the /etc/services.d/flood/run file with formatting changes, added
+#       comments, minor syntax changes, added web UI port related code, and Flood run command changes
+#       (configuration directory and port changes)
+
+# Set the umask for this script
+umask "$UMASK"
+
+# Check if Flood authentication is enabled
+if [[ $FLOOD_AUTH == true ]]; then
+  FLOOD_OPTION_AUTH=default && export FLOOD_OPTION_AUTH
+  # echo "qBittorrent is running on \"http://127.0.0.1:${WEBUI_PORTS%%/*}\" for Flood configuration."
+else
+  FLOOD_OPTION_AUTH=none && export FLOOD_OPTION_AUTH
+fi
+
+# Get the second port specified in the WEBUI_PORTS environment variable
+# Note: logically it would make more sense to use the last port in the WEBUI_PORTS environment
+#       variable for this instance of Flood, however, that would require modifying the original
+#       /etc/services.d/flood/run file, therefore for simplicity we use the middle port in the
+#       WEBUI_PORTS environment variable for this instance of Flood and leave the last port for
+#       the original instance of Flood
+declare port=${WEBUI_PORTS#*,}
+port=${port%%/*}
+
+# Start Flood
+# shellcheck disable=SC2086
+exec s6-setuidgid hotio "$APP_DIR/flood" --rundir "$CONFIG_DIR/flood-mobile" --host 0.0.0.0 \
+  --port "$port" --qburl "http://127.0.0.1:${WEBUI_PORTS%%/*}" --qbuser "dummy" --qbpass "dummy" \
+  $FLOOD_ARGS
