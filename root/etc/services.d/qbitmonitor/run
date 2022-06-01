@@ -1,0 +1,185 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Check if we're running as root and instead run as the hotio user
+if (( $(id --user) == 0 ))
+then
+  exec s6-setuidgid hotio "$0" "$@"
+fi
+
+# Wait 1 minute
+sleep 60
+
+# Set the umask for this script
+umask "$UMASK"
+
+# Get the qBitMonitor configuration and extract the host and extract and create an array of all the
+#   configured trackers
+declare configuration="$(< /config/qbitmonitor.json)"
+declare host="$(jq --raw-output '."host"' <<< "$configuration")"
+declare -a config_trackers
+readarray -t config_trackers < <(jq --compact-output '."trackers" | .[]' <<< "$configuration")
+
+# Get the qBittorrent preferences and extract the global maximum ratio and the global maximum
+#   seeding time
+declare preferences="$(curl --silent --fail --show-error --insecure \
+  --request GET "$host/api/v2/app/preferences")"
+# Note: since pref_max_ratio can be a floating point number we are treating it as a string
+declare pref_max_ratio="$(jq '."max_ratio"' <<< "$preferences")"
+declare -i pref_max_seeding_time=$(jq '."max_seeding_time"' <<< "$preferences")
+
+# Make sure we exit the loop when asked
+trap "exit" INT TERM QUIT
+
+# Loop indefinately
+while true
+do
+  # Get and create an array of all the torrents
+  declare -a torrents
+  readarray -t torrents < <(curl --silent --fail --show-error --insecure \
+    --request GET "$host/api/v2/torrents/info" | jq --compact-output '.[]')
+
+  # Loop through all the torrents
+  for torrent in "${torrents[@]}"
+  do
+    # Extract the torrent hash, category, state, ratio, and seeding time
+    declare hash="$(jq --raw-output '."hash"' <<< "$torrent")"
+    declare category="$(jq --raw-output '."category"' <<< "$torrent")"
+    declare state="$(jq --raw-output '."state"' <<< "$torrent")"
+    # Note: since ratio can be a floating point number we are treating it as a string
+    declare ratio="$(jq '."ratio"' <<< "$torrent")"
+    declare -i seeding_time=$(jq '."seeding_time"' <<< "$torrent")
+
+    # Extract the maximum ratio
+    # Note: since max_ratio can be a floating point number we are treating it as a string
+    # Note: a value of -2 means the prefereces maximum ratio should be used
+    declare max_ratio="$(jq '."max_ratio"' <<< "$torrent")"
+    if (( "$max_ratio" == "-2" ))
+    then
+      max_ratio="$pref_max_ratio"
+    fi
+
+    # Extract the maximum seeding time
+    # Note: a value of -2 means the preferences maximum seeding time should be used
+    # Note: the maximum seeding time is reported in minutes while the torrent seeding time is
+    #       reported in seconds so we convert the maximum seeding time to seconds unless the value
+    #       is -1 which means the maximum seeding time is not set
+    declare -i max_seeding_time=$(jq '."max_seeding_time"' <<< "$torrent")
+    if (( max_seeding_time == -2 ))
+    then
+      max_seeding_time=$pref_max_seeding_time
+    fi
+    if (( max_seeding_time != -1 ))
+    then
+      max_seeding_time=$((max_seeding_time * 60))
+    fi
+
+    # Switch based on the torrent category
+    # Note: this is a fall through switch statement
+    declare new_category=""
+    case $category in
+      "")
+        # Check if the torrent state is downloading, metaDL, pausedDL, queuedDL, stalledDL,
+        #   checkingDL, or forcedDL and set a new category
+        if [[ "$state" == "downloading" || "$state" == "metaDL" || "$state" == "pausedDL" || \
+          "$state" == "queuedDL" || "$state" == "stalledDL" || "$state" == "checkingDL" || \
+          "$state" == "forcedDL" ]]
+        then
+          new_category="Downloading"
+        fi
+        ;&
+      "Downloading")
+        # Check if the torrent state is uploading, pausedUP, queuedUP, stalledUP, checkingUP, or
+        #   forcedUP and the maxiumum ratio is not set or the torrent ratio is less than the maximum
+        #   ratio and the maximum seeding time is not set or the torrent seeding time is less than
+        #   the maximum seeding time and set a new category
+        # Note: since max_ratio can be a floating point number we are treating it as a string
+        if [[ "$state" == "uploading" || "$state" == "pausedUP" || "$state" == "queuedUP" || \
+          "$state" == "stalledUP" || "$state" == "checkingUP" || "$state" == "forcedUP" ]] && \
+          ( ( [[ "$max_ratio" == "-1" ]] || \
+          (( $(bc <<< "if ($ratio < $max_ratio) 1 else 0") == 1 )) ) && \
+          ( (( $max_seeding_time == -1 || $seeding_time < $max_seeding_time )) ) )
+        then
+          new_category="Seeding"
+        fi
+        ;&
+      "Seeding")
+        # Check if the torrent state is uploading, pausedUP, queuedUP, stalledUP, checkingUP, or
+        #   forcedUP and the maximum ratio is set and the torrent ratio is greater than or equal to
+        #   the maximum ratio or the maximum seeding time is set and the torrent seeding time is
+        #   greater than or equal to the maximum seeding time and set a new category
+        # Note: since max_ratio can be a floating point number we are treating it as a string
+        if [[ "$state" == "uploading" || "$state" == "pausedUP" || "$state" == "queuedUP" || \
+          "$state" == "stalledUP" || "$state" == "checkingUP" || "$state" == "forcedUP" ]] && \
+          ( ( [[ "$max_ratio" != "-1" ]] && \
+          (( $(bc <<< "if ($ratio >= $max_ratio) 1 else 0") == 1 )) ) || \
+          ( (( $max_seeding_time != -1 && $seeding_time >= $max_seeding_time )) ) )
+        then
+          new_category="Finished"
+        fi
+        ;&
+    esac
+
+    # Check if the torrent should have a new category
+    if [[ -n "$new_category" ]]
+    then
+      # Change the torrent category
+      echo "[qBitMonitor] Setting new category ($new_category) for torrent with hash:"
+      echo "              $hash"
+      curl --silent --fail --show-error --insecure \
+        --request POST "$host/api/v2/torrents/setCategory" \
+        --data "hashes=$hash&category=$new_category"
+    fi
+
+    # Extract the torrent tracker
+    declare tracker="$(jq '."tracker"' <<< "$torrent")"
+
+    # Loop through all the configured trackers
+    for config_tracker in "${config_trackers[@]}"
+    do
+      # Extract the configured tracker regex
+      declare config_tracker_regex="$(jq --raw-output '."regex"' <<< "$config_tracker")"
+
+      # Check if the torrent tracker matches the configured tracker regex
+      if [[ "$tracker" =~ $config_tracker_regex ]]
+      then
+        # Extract the tracker tags and the configured tracker tag
+        declare tags="$(jq --raw-output '."tags"' <<< "$torrent")"
+        declare config_tracker_tag="$(jq --raw-output '."tag"' <<< "$config_tracker")"
+
+        # Check if the torrent tags already contain the configured tracker tag
+        if [[ "$tags" =~ (^|, |,)$config_tracker_tag(,|$) ]]
+        then
+          # Finish looping through the configured trackers
+          break
+        fi
+
+        # Extract the configured tracker ratio and seeding time
+        declare config_tracker_ratio=$(jq '."ratio"' <<< "$config_tracker")
+        declare config_tracker_seeding_time=$(jq '."seeding-time"' <<< "$config_tracker")
+
+        # Add the configured tracker tag to the torrent
+        echo "[qBitMonitor] Adding new tag ($config_tracker_tag) to torrent with hash:"
+        echo "              $hash"
+        curl --silent --fail --show-error --insecure \
+          --request POST "$host/api/v2/torrents/addTags" \
+          --data "hashes=$hash&tags=$config_tracker_tag"
+
+        # Set the configured tracker ratio and seeding time for the torrent
+        echo "[qBitMonitor] Setting new share limits ($config_tracker_ratio/"\
+"$config_tracker_seeding_time) for torrent with hash:"
+        echo "              $hash"
+        curl --silent --fail --show-error --insecure \
+          --request POST "$host/api/v2/torrents/setShareLimits" \
+          --data "hashes=$hash&ratioLimit=$config_tracker_ratio&"\
+"seedingTimeLimit=$config_tracker_seeding_time"
+
+        # Finish looping through the configured trackers
+        break
+      fi
+    done
+  done
+
+  # Wait 1 minute
+  sleep 60
+done
