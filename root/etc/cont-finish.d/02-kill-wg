@@ -1,0 +1,21 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Set the umask for this script
+umask "$UMASK"
+
+# Check if VPN was enabled
+if [[ $VPN_ENABLED == "true" ]]
+then
+  # Delete route added in /etc/cont-init.d/02-setup-wg file to fix the double route adding error
+  #   (RTNETLINK answers: File exists) on automatic container restarts
+  # Note: this is based on the code found in the /etc/cont-init.d/02-setup-wg file with minor syntax
+  #       changes and the "ip route add" statement changed to "ip route del"
+  nw_interface=$(ip -o -4 route show to default | awk '{print $5}')
+  gateway=$(ip -o -4 route show to default | awk '{print $3}')
+  IFS="," read -ra lan_networks <<< "$VPN_LAN_NETWORK"
+  for lan_network in "${lan_networks[@]}"; do
+    echo "[INFO] Deleting \"$lan_network\" as route via interface \"$nw_interface\"."
+    ip route del "$lan_network" via "$gateway" dev "$nw_interface"
+  done
+fi
