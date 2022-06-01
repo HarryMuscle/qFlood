@@ -1,4 +1,4 @@
-FROM hotio/qflood:release-4.4.2--4.7.0
+FROM hotio/qflood:release-4.4.3.1--4.7.0
 
 # Copy files
 COPY root/ /
