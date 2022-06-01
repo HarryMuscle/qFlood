@@ -1,0 +1,6 @@
+#!/usr/bin/execlineb -S0
+# shellcheck shell=bash
+
+# Note: the following is a copy of the /etc/services.d/flood/finish file
+
+redirfd -w 2 /dev/null s6-svscanctl -t /var/run/s6/services
