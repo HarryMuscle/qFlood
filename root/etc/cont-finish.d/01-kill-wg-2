@@ -5,7 +5,7 @@
 umask "$UMASK"
 
 # Check if VPN was enabled
-if [[ $VPN_ENABLED == "true" ]]
+if [[ $VPN_ENABLED == true ]]
 then
   # Delete route added in /etc/cont-init.d/02-setup-wg file to fix the double route adding error
   #   (RTNETLINK answers: File exists) on automatic container restarts
