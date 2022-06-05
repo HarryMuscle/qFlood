@@ -12,5 +12,5 @@ RUN sed --in-place \
 # Remove setting of the net.ipv4.conf.all.src_valid_mark kernel parameter in the /usr/bin/wg-quick
 #   file to allow running on Kubernetes without privleged mode
 RUN sed --in-place \
-  '/^\s\+\[\[ \$proto == -4 \]\] && cmd sysctl -q net.ipv4.conf.all.src_valid_mark=1$/d' \
+  '/^\s*\[\[ \$proto == -4 \]\] && cmd sysctl -q net.ipv4.conf.all.src_valid_mark=1$/d' \
   /usr/bin/wg-quick
